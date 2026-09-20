@@ -1,7 +1,12 @@
 import sqlite3
+import os
+
+DB_DIR = os.environ.get("DB_DIR", "data")
+DB_PATH = os.path.join(DB_DIR, "students.db")
 
 def init_db():
-    conn = sqlite3.connect("students.db")
+    os.makedirs(DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS students (
@@ -13,7 +18,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    print("Database Initialized Successfully.")
+    print(f"Database Initialized Successfully at {DB_PATH}.")
 
 if __name__ == "__main__":
     init_db()

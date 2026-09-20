@@ -11,8 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all application files
 COPY . .
 
-# Initialize sqlite db if not already present
-RUN python create_database.py
+# Create directory for persistent SQLite database
+RUN mkdir -p /app/data
+
+# Declare volume for data persistence across container deployments
+VOLUME ["/app/data"]
 
 # Expose port 5000 for Flask/Gunicorn
 EXPOSE 5000
