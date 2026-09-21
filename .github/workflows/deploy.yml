@@ -24,9 +24,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Test Database Creation
+      - name: Validate HTML Form Fields (CI Check)
         run: |
-          python create_database.py
+          python test_html.py
 
   # ==========================================
   # CD STEP 1: Build & Push Docker Image
