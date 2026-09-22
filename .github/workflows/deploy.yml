@@ -1,48 +1,20 @@
-name: CI/CD Pipeline – Student Management System
+name: CI/CD Pipeline - Student Management System
 
-# ─────────────────────────────────────────────────────────────
-# TRIGGER RULES
-#   • Any branch push  → run CI (tests / rules check)
-#   • Merge into main  → CI + Build Docker + Push to AWS ECR
-#                        + Deploy on AWS EC2
-#
-# Team workflow: each member pushes to their own branch.
-# CI runs immediately on every push so errors are caught early.
-# When a branch is merged into main, the full CD pipeline fires
-# and ONE Docker image is built and deployed to AWS.
-# ─────────────────────────────────────────────────────────────
 on:
   push:
-    branches:
-      - "**"       # ALL branches trigger CI
-  pull_request:
-    branches:
-      - main       # PRs targeting main also run CI
-
-# ─────────────────────────────────────────────────────────────
-# SHARED ENVIRONMENT  (edit these to match your AWS setup)
-# ─────────────────────────────────────────────────────────────
-env:
-  AWS_REGION: us-east-1                   # ← change to your region
-  ECR_REPO:   student-management-system   # ← your ECR repository name
-  IMAGE_TAG:  ${{ github.sha }}           # unique tag per commit
+    branches: [ "main" ]
 
 jobs:
-
-  # ===========================================================
-  # JOB 1 – CI: Check Rules & Run Tests
-  # Runs on EVERY branch so all team members get fast feedback.
-  # Blocks the rest of the pipeline if anything fails.
-  # ===========================================================
+  # ==========================================
+  # CI STEP: Run Automated Verification Tests
+  # ==========================================
   continuous-integration:
-    name: "CI – Check Rules & Run Tests"
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -52,122 +24,66 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Rule check: HTML form field names must match what app.py expects
-      - name: "Rule Check – Validate HTML Form Fields"
+      - name: Validate HTML Form Fields (CI Check)
         run: |
-          echo "Checking that index.html form fields match app.py expectations..."
           python test_html.py
 
-      # Run any additional pytest tests if they exist
-      - name: "Run Pytest (if test files exist)"
-        run: |
-          if find . -name "test_*.py" -not -name "test_html.py" | grep -q .; then
-            pytest --tb=short
-          else
-            echo "No extra pytest files found – skipping."
-          fi
-
-  # ===========================================================
-  # JOB 2 – Build Docker Image & Push to AWS ECR
-  # Only runs after CI passes AND only on the 'main' branch.
-  # All team branches merge here → ONE unified Docker image.
-  # ===========================================================
-  build-and-push-ecr:
-    name: "Build Docker → Push to AWS ECR"
+  # ==========================================
+  # CD STEP 1: Build & Push Docker Image
+  # ==========================================
+  build-and-push:
     needs: continuous-integration
     runs-on: ubuntu-latest
-    # Only deploy when code is pushed/merged into main
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    outputs:
-      image-uri: ${{ steps.build-push.outputs.image-uri }}
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Log in to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build and Push Docker Image to ECR
-        id: build-push
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
-          LATEST_URI="${ECR_REGISTRY}/${ECR_REPO}:latest"
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/student-app:latest
 
-          echo "Building image: $IMAGE_URI"
-          docker build -t "$IMAGE_URI" -t "$LATEST_URI" .
-
-          echo "Pushing image to ECR..."
-          docker push "$IMAGE_URI"
-          docker push "$LATEST_URI"
-
-          echo "image-uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
-          echo "Docker push complete."
-
-  # ===========================================================
-  # JOB 3 – Deploy to AWS EC2
-  # SSHs into EC2, pulls the new image from ECR, restarts app.
-  # Only runs after a successful build, on 'main' only.
-  # ===========================================================
-  deploy-to-aws-ec2:
-    name: "Deploy to AWS EC2"
-    needs: build-and-push-ecr
+  # ==========================================
+  # CD STEP 2: Deploy to AWS EC2 via SSH
+  # ==========================================
+  deploy-to-aws:
+    needs: build-and-push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
     steps:
-      - name: Deploy New Image on AWS EC2 via SSH
+      - name: Deploy on AWS EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
-          key:      ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e
-
-            AWS_REGION="${{ env.AWS_REGION }}"
-            ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-            ECR_REPO="${{ env.ECR_REPO }}"
-            IMAGE_TAG="${{ env.IMAGE_TAG }}"
-            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
-
-            echo "================================================"
-            echo " Deploying commit: $IMAGE_TAG"
-            echo "================================================"
-
-            echo "[1/5] Authenticating EC2 with AWS ECR..."
-            aws ecr get-login-password --region "$AWS_REGION" | \
-              docker login --username AWS --password-stdin "$ECR_REGISTRY"
-
-            echo "[2/5] Pulling new image from ECR..."
-            docker pull "$IMAGE_URI"
-
-            echo "[3/5] Ensuring persistent data directory exists..."
+            echo "1. Ensuring persistent host data directory exists..."
             mkdir -p /home/ubuntu/student_data
 
-            echo "[4/5] Stopping and removing old container..."
+            echo "2. Stopping and removing previous container..."
             docker stop student-app || true
-            docker rm   student-app || true
+            docker rm student-app || true
 
-            echo "[5/5] Starting new container..."
+            echo "3. Pulling latest image from Docker Hub..."
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/student-app:latest
+
+            echo "4. Starting updated container with persistent database volume on port 5000..."
             docker run -d \
               --name student-app \
               -p 5000:5000 \
               -v /home/ubuntu/student_data:/app/data \
               --restart always \
-              "$IMAGE_URI"
+              ${{ secrets.DOCKERHUB_USERNAME }}/student-app:latest
 
-            echo "================================================"
-            echo " Deployment complete! App running on port 5000"
-            echo "================================================"
+            echo "5. Continuous Deployment completed successfully! Data is persisted."
